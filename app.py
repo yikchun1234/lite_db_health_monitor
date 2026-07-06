@@ -475,8 +475,11 @@ def get_metrics():
             if ple_row and ple_row['cntr_value'] < 300:
                 alerts.append(f"🚨 CRITICAL: Memory Health (Page Life Expectancy) is dangerously low at {ple_row['cntr_value']} seconds!")
                 
-            jobs_query = text("WITH LatestRuns AS (SELECT j.name AS JobName, h.run_status, msdb.dbo.agent_datetime(h.run_date, h.run_time) AS RunDateTime, h.message AS ErrorMessage, ROW_NUMBER() OVER(PARTITION BY j.job_id ORDER BY h.run_date DESC, h.run_time DESC) as rn FROM msdb.dbo.sysjobhistory h WITH (nolock) JOIN msdb.dbo.sysjobs j WITH (nolock) ON h.job_id = j.job_id WHERE h.step_id = 0 AND msdb.dbo.agent_datetime(h.run_date, h.run_time) >= DATEADD(hour, -24, GETDATE())) SELECT JobName, CONVERT(VARCHAR, RunDateTime, 120) AS FailDate, ErrorMessage FROM LatestRuns WHERE rn = 1 AND run_status = 0 ORDER BY RunDateTime DESC;")
-            failed_jobs = [{"job_name": r['JobName'], "fail_date": r['FailDate'], "error_message": r['ErrorMessage']} for r in conn.execute(jobs_query).mappings()]
+            try:
+                jobs_query = text("WITH LatestRuns AS (SELECT j.name AS JobName, h.run_status, msdb.dbo.agent_datetime(h.run_date, h.run_time) AS RunDateTime, h.message AS ErrorMessage, ROW_NUMBER() OVER(PARTITION BY j.job_id ORDER BY h.run_date DESC, h.run_time DESC) as rn FROM msdb.dbo.sysjobhistory h WITH (nolock) JOIN msdb.dbo.sysjobs j WITH (nolock) ON h.job_id = j.job_id WHERE h.step_id = 0 AND msdb.dbo.agent_datetime(h.run_date, h.run_time) >= DATEADD(hour, -24, GETDATE())) SELECT JobName, CONVERT(VARCHAR, RunDateTime, 120) AS FailDate, ErrorMessage FROM LatestRuns WHERE rn = 1 AND run_status = 0 ORDER BY RunDateTime DESC;")
+                failed_jobs = [{"job_name": r['JobName'], "fail_date": r['FailDate'], "error_message": r['ErrorMessage']} for r in conn.execute(jobs_query).mappings()]
+            except Exception:
+                failed_jobs = [{"job_name": "Permission Denied", "fail_date": "N/A", "error_message": "Monitoring account lacks EXECUTE on msdb.dbo.agent_datetime. Request GRANT from sysadmin."}]
             
             blocking_query = text("SELECT r.session_id, r.blocking_session_id, DB_NAME(r.database_id) AS DatabaseName, r.total_elapsed_time / 1000 AS SecondsRunning, t.text AS QueryText FROM sys.dm_exec_requests r CROSS APPLY sys.dm_exec_sql_text(r.sql_handle) t WHERE r.session_id > 50 AND r.status NOT IN ('background', 'sleeping') AND (r.blocking_session_id <> 0 OR r.total_elapsed_time > 60000);")
             long_queries = []
@@ -488,8 +491,11 @@ def get_metrics():
             sysadmin_query = text("SELECT sp.name AS LoginName, sp.type_desc AS LoginType, sp.is_disabled AS IsDisabled FROM sys.server_principals sp JOIN sys.server_role_members srm ON sp.principal_id = srm.member_principal_id JOIN sys.server_principals spr ON srm.role_principal_id = spr.principal_id WHERE spr.name = 'sysadmin' AND sp.name NOT LIKE '##%';")
             sysadmins = [{"login_name": r['LoginName'], "login_type": r['LoginType'], "is_disabled": r['IsDisabled']} for r in conn.execute(sysadmin_query).mappings()]
             
-            restore_query = text("SELECT TOP 50 destination_database_name AS DatabaseName, CONVERT(VARCHAR, restore_date, 120) AS RestoreDate, user_name AS RestoredBy FROM msdb.dbo.restorehistory WHERE restore_date >= DATEADD(day, -7, GETDATE()) ORDER BY restore_date DESC;")
-            recent_restores = [{"database": r['DatabaseName'], "restore_date": r['RestoreDate'], "restored_by": r['RestoredBy']} for r in conn.execute(restore_query).mappings()]
+            try:
+                restore_query = text("SELECT TOP 50 destination_database_name AS DatabaseName, CONVERT(VARCHAR, restore_date, 120) AS RestoreDate, user_name AS RestoredBy FROM msdb.dbo.restorehistory WHERE restore_date >= DATEADD(day, -7, GETDATE()) ORDER BY restore_date DESC;")
+                recent_restores = [{"database": r['DatabaseName'], "restore_date": r['RestoreDate'], "restored_by": r['RestoredBy']} for r in conn.execute(restore_query).mappings()]
+            except Exception:
+                recent_restores = [{"database": "Permission Denied", "restore_date": "N/A", "restored_by": "N/A"}]
             
             cpu_query = text("SELECT TOP (1) record.value('(./Record/SchedulerMonitorEvent/SystemHealth/ProcessUtilization)[1]', 'int') AS SQL_CPU, record.value('(./Record/SchedulerMonitorEvent/SystemHealth/SystemIdle)[1]', 'int') AS SystemIdle_CPU FROM (SELECT CAST(record AS xml) AS record FROM sys.dm_os_ring_buffers WITH (NOLOCK) WHERE ring_buffer_type = N'RING_BUFFER_SCHEDULER_MONITOR' AND record LIKE '%<SystemHealth>%') AS x ORDER BY record.value('(./Record/@id)[1]', 'int') DESC;")
             cpu_row = conn.execute(cpu_query).mappings().first()
@@ -520,8 +526,11 @@ def get_metrics():
             
             ram_usage = []
             
-            running_jobs_query = text("SELECT j.name AS JobName, ja.start_execution_date AS StartTime, DATEDIFF(MINUTE, ja.start_execution_date, GETDATE()) AS MinutesRunning FROM msdb.dbo.sysjobactivity ja WITH (NOLOCK) JOIN msdb.dbo.sysjobs j WITH (NOLOCK) ON ja.job_id = j.job_id WHERE ja.start_execution_date IS NOT NULL AND ja.stop_execution_date IS NULL AND ja.session_id = (SELECT TOP 1 session_id FROM msdb.dbo.syssessions ORDER BY agent_start_date DESC);")
-            running_jobs = [{"job_name": r['JobName'], "start_time": r['StartTime'].strftime('%Y-%m-%d %H:%M:%S') if r['StartTime'] else '', "minutes_running": int(r['MinutesRunning']) if r['MinutesRunning'] else 0} for r in conn.execute(running_jobs_query).mappings()]
+            try:
+                running_jobs_query = text("SELECT j.name AS JobName, ja.start_execution_date AS StartTime, DATEDIFF(MINUTE, ja.start_execution_date, GETDATE()) AS MinutesRunning FROM msdb.dbo.sysjobactivity ja WITH (NOLOCK) JOIN msdb.dbo.sysjobs j WITH (NOLOCK) ON ja.job_id = j.job_id WHERE ja.start_execution_date IS NOT NULL AND ja.stop_execution_date IS NULL AND ja.session_id = (SELECT TOP 1 session_id FROM msdb.dbo.syssessions ORDER BY agent_start_date DESC);")
+                running_jobs = [{"job_name": r['JobName'], "start_time": r['StartTime'].strftime('%Y-%m-%d %H:%M:%S') if r['StartTime'] else '', "minutes_running": int(r['MinutesRunning']) if r['MinutesRunning'] else 0} for r in conn.execute(running_jobs_query).mappings()]
+            except Exception:
+                running_jobs = [{"job_name": "Permission Denied", "start_time": "N/A", "minutes_running": 0}]
             
             io_query = text("""
             WITH IOLatency AS (
